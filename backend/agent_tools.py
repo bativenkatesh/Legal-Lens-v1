@@ -1,157 +1,115 @@
-import os
-import pymongo
+# --- MAC OS SQLITE FIX (MUST BE TOP) ---
+import sqlite3
+import sys
+if sqlite3.sqlite_version_info < (3, 35, 0):
+    sqlite3.sqlite_version_info = (3, 35, 0)
+    sqlite3.sqlite_version = "3.35.0"
+    sys.modules['sqlite3'] = sqlite3
+# ---------------------------------------
+
 import numpy as np
-import certifi
+import pymongo
 from langchain.tools import tool
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import OllamaEmbeddings
+from flashrank import Ranker, RerankRequest
 
-# --- CONFIGURATION ---
-# 1. ATLAS CONFIG (Rules - 1024 dimensions)
-# Replace with your actual connection string if different
-ATLAS_URI = "mongodb+srv://venky27274_db_user:eaOlsGwJxuygDSOw@cluster0.3ue3woh.mongodb.net/"
-ATLAS_DB_NAME = "Dataset1"
-RULES_COLLECTION = "rules"
-ATLAS_VECTOR_INDEX = "vector_index"
-
-# 2. LOCAL CONFIG (Articles - 384 dimensions)
+# --- CONFIG ---
+CHROMA_PATH = "./chroma_db_new"
 LOCAL_MONGO_URI = "mongodb://localhost:27017/"
-LOCAL_DB_NAME = "DB1"   # <--- VERIFY THIS NAME (Check your local mongo setup)
+LOCAL_DB_NAME = "DB1"
 ARTICLES_COLLECTION = "articles"
 
-print("--- [INIT] Loading Embedding Models... ---")
+print("--- [INIT] Loading Search Engines... ---")
 
-# Model 1: For Rules (Atlas uses BAAI/bge-large-en-v1.5 -> 1024 dims)
+# --- ENGINE 1: LEGAL RULES (Smart RAG) ---
+print("   Loading Legal Rules (ChromaDB + Flashrank)...")
 try:
-    print("   Loading Rules Model (1024 dims)...")
-    model_rules = SentenceTransformer('BAAI/bge-large-en-v1.5')
+    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    vectorstore = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
+    ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./opt")
+    print("✅ Legal Engine Ready.")
 except Exception as e:
-    print(f"❌ Failed to load Rules model: {e}")
-    model_rules = None
+    print(f"❌ Failed to load Legal Engine: {e}")
+    vectorstore = None
+    ranker = None
 
-# Model 2: For Articles (Local uses all-MiniLM-L6-v2 -> 384 dims)
+# --- ENGINE 2: PRACTICAL ARTICLES (Legacy Local Search) ---
+print("   Loading Articles Engine...")
 try:
-    print("   Loading Articles Model (384 dims)...")
     model_articles = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-except Exception as e:
-    print(f"❌ Failed to load Articles model: {e}")
-    model_articles = None
-
-print("--- [INIT] Connecting to Databases... ---")
-
-# Connection 1: Atlas
-try:
-    client_atlas = pymongo.MongoClient(ATLAS_URI, tlsCAFile=certifi.where())
-    coll_rules = client_atlas[ATLAS_DB_NAME][RULES_COLLECTION]
-    # Ping to verify
-    client_atlas.admin.command('ping')
-    print("✅ Connected to Atlas (Rules)")
-except Exception as e:
-    print(f"❌ Atlas Connection Failed: {e}")
-    coll_rules = None
-
-# Connection 2: Local Mongo
-try:
     client_local = pymongo.MongoClient(LOCAL_MONGO_URI)
     coll_articles = client_local[LOCAL_DB_NAME][ARTICLES_COLLECTION]
+    # Quick ping
     client_local.admin.command('ping')
-    print("✅ Connected to Local Mongo (Articles)")
+    print("✅ Articles Engine Ready.")
 except Exception as e:
-    print(f"❌ Local Mongo Connection Failed: {e}")
+    print(f"❌ Failed to load Articles Engine: {e}")
     coll_articles = None
-
+    model_articles = None
 
 @tool
 def search_legal_rules(query: str) -> str:
     """
-    Search MongoDB Atlas for Indian Income Tax Rules/Sections (Official Law).
-    Always use this FIRST to find the section numbers and legal basis.
+    Search for Indian Income Tax Rules.
+    Returns the FULL text of the most relevant sections.
     """
-    if not coll_rules or not model_rules:
-        return "Error: Atlas DB or Rules Model not loaded."
-
-    print(f"🔍 [TOOL] Searching Rules for: {query}")
+    # FIX 1: Explicit check for None
+    if vectorstore is None: return "Error: Legal DB not loaded."
     
     try:
-        # 1. Encode (1024 dims)
-        query_vec = model_rules.encode(query).tolist()
+        results = vectorstore.similarity_search(query, k=15)
+        unique_parents = {}
         
-        # 2. Atlas Vector Search
-        results = coll_rules.aggregate([
-            {
-                "$vectorSearch": {
-                    "index": ATLAS_VECTOR_INDEX,
-                    "path": "embedding",
-                    "queryVector": query_vec,
-                    "numCandidates": 50,
-                    "limit": 3
+        for doc in results:
+            sec_id = doc.metadata.get("section")
+            if sec_id and sec_id not in unique_parents:
+                unique_parents[sec_id] = {
+                    "text": doc.metadata.get("parent_content"),
+                    "title": doc.metadata.get("title"),
+                    "meta": doc.metadata
                 }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "section": 1,
-                    "title": 1,
-                    "full_content": 1
-                }
-            }
-        ])
+        
+        passages = [{"id": k, "text": v["text"], "meta": v["meta"]} for k, v in unique_parents.items()]
+        ranked_results = ranker.rerank(RerankRequest(query=query, passages=passages))
         
         output = []
-        for doc in results:
-            sec = doc.get('section', 'N/A')
-            title = doc.get('title', 'N/A')
-            text = doc.get('full_content', '')[:1000]
-            output.append(f"SECTION: {sec} - {title}\nTEXT: {text}...")
+        for hit in ranked_results[:3]:
+            sec_id = hit['id']
+            full_text = unique_parents[sec_id]['text']
+            title = unique_parents[sec_id]['title']
+            output.append(f"SECTION: {sec_id}\nTITLE: {title}\nFULL CONTENT:\n{full_text}\n---")
             
-        return "\n\n".join(output) if output else "No relevant rules found."
-        
+        return "\n".join(output) if output else "No relevant sections found."
     except Exception as e:
-        return f"Error in Atlas search: {e}"
+        return f"Error in search: {e}"
 
 @tool
 def search_practical_articles(query: str) -> str:
     """
     Search Local Database for articles, case laws, and practical examples.
-    Use this SECOND to interpret the law.
     """
-    if not coll_articles or not model_articles:
-        return "Error: Local DB or Articles Model not loaded."
-
-    print(f"🔍 [TOOL] Searching Articles for: {query}")
-
+    # FIX 2: Explicit check for None (The cause of your crash)
+    if coll_articles is None: return "Error: Article DB not loaded"
+    
     try:
-        # 1. Encode (384 dims)
-        query_vec = model_articles.encode(query) # numpy array
+        query_vec = model_articles.encode(query)
+        # Fetch generic candidates
+        candidates = list(coll_articles.find({}, {"embedding": 1, "title": 1, "full_text": 1}).limit(200))
         
-        # 2. Manual Vector Search (Cosine Similarity)
-        # Fetch minimal fields + embedding
-        candidates = list(coll_articles.find({}, {"embedding": 1, "title": 1, "full_text": 1}))
-        
-        if not candidates:
-            return "No articles found in local database."
+        if not candidates: return "No articles found."
 
-        # Extract embeddings
-        cand_vecs = [c['embedding'] for c in candidates]
-        cand_vecs = np.array(cand_vecs)
-        
-        # Calculate Cosine Similarity
-        # reshape query_vec to (1, 384) for sklearn
-        similarities = cosine_similarity([query_vec], cand_vecs)[0]
-        
-        # Get Top 3 Indices
-        top_indices = similarities.argsort()[-3:][::-1]
+        cand_vecs = np.array([c['embedding'] for c in candidates])
+        sims = cosine_similarity([query_vec], cand_vecs)[0]
         
         output = []
-        for idx in top_indices:
-            score = similarities[idx]
-            if score < 0.35: # Filter noise
-                continue
-            
+        for idx in sims.argsort()[-3:][::-1]:
+            if sims[idx] < 0.35: continue
             doc = candidates[idx]
-            output.append(f"ARTICLE: {doc.get('title')}\nTEXT: {doc.get('full_text', '')[:600]}...")
+            output.append(f"ARTICLE: {doc.get('title')}\nTEXT: {doc.get('full_text','')[:800]}...")
             
-        return "\n\n".join(output) if output else "No relevant articles found."
-
+        return "\n\n".join(output) if output else "No articles found."
     except Exception as e:
-        return f"Error in Local search: {e}"
+        return f"Error: {e}"

@@ -33,3 +33,9 @@ Thumbs.db
 *.pkl
 *.npy
 
+
+# Vector DB / Chroma
+backend/chroma_db_new/
+*.bin
+*.sqlite3
+*.db
