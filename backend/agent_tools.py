@@ -1,6 +1,7 @@
 # --- MAC OS SQLITE FIX (MUST BE TOP) ---
 import sqlite3
 import sys
+import re  # Added regex for smart detection
 
 if sqlite3.sqlite_version_info < (3, 35, 0):
     sqlite3.sqlite_version_info = (3, 35, 0)
@@ -26,9 +27,8 @@ ARTICLES_COLLECTION = "articles"
 
 print("--- [INIT] Loading Search Engines... ---")
 
-
-# --- ENGINE 1: LEGAL RULES (Smart RAG) ---
-print(" Loading Legal Rules (ChromaDB + Flashrank)...")
+# --- ENGINE 1: LEGAL RULES (ChromaDB) ---
+print(" Loading Legal Rules (ChromaDB Only)...")
 
 try:
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
@@ -36,20 +36,19 @@ try:
         persist_directory=CHROMA_PATH,
         embedding_function=embeddings
     )
-
-    # Using the STABLE model (Avoids token_type_ids and invalid rank errors)
-    ranker = Ranker(
-        model_name="ms-marco-MiniLM-L-12-v2",
-        cache_dir="./opt"
-    )
-
     print("✅ Legal Engine Ready.")
 
 except Exception as e:
     print(f"❌ Failed to load Legal Engine: {e}")
     vectorstore = None
-    ranker = None
+print(" Loading FlashRank Reranker...")
 
+try:
+    reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
+    print("✅ FlashRank Ready.")
+except Exception as e:
+    print(f"❌ FlashRank failed to load: {e}")
+    reranker = None
 
 # --- ENGINE 2: PRACTICAL ARTICLES ---
 print(" Loading Articles Engine...")
@@ -81,60 +80,94 @@ def search_legal_rules(query: str) -> str:
         return "Error: Legal DB not loaded."
 
     try:
-        # 1. Vector Search
-        results = vectorstore.similarity_search(query, k=15)
+        print(f"🔍 Searching VectorDB for: {query}")
+        
+        results = []
+        
+        # --- SMART LOOKUP: Detect "Section X" or just "80C" ---
+        # Regex looks for patterns like: "Section 80C", "sec 80c", or just "80c" (if short)
+        # It captures the alphanumeric code (e.g., 80C, 10A)
+        section_match = re.search(r"(?:section\s+|sec\s+|s\.\s*)?([0-9]+[a-zA-Z]{0,3})", query, re.IGNORECASE)
+        
+        if section_match:
+            # Normalize to Upper Case (e.g., "80c" -> "80C")
+            target_section = section_match.group(1).upper()
+            
+            print(f"   🎯 Detected specific section request: {target_section}")
+            
+            # 1. Try Metadata Filter Search (High Precision)
+            # This looks ONLY for documents where metadata['section'] == "80C"
+            try:
+                results = vectorstore.similarity_search(
+                    query, 
+                    k=10, 
+                    filter={"section": target_section}
+                )
+                if results:
+                    print(f"   ✅ Found {len(results)} exact matches via filter.")
+            except Exception as filter_err:
+                print(f"   ⚠️ Filter search failed (maybe metadata is different): {filter_err}")
+                results = []
 
-        # 2. Extract Candidates
-        unique_parents = {}
+        # 2. Fallback: Standard Semantic Search (Broad Recall)
+        # If the filter found nothing (or user didn't ask for a specific section), run normal search
+        if not results:
+            print("   🌐 Running standard semantic search...")
+            if not results:
+                print("   🌐 Running semantic search (Top-20 for reranking)...")
+                results = vectorstore.similarity_search(query, k=20)
+            if reranker and results:
+                print("   🔁 Reranking with FlashRank...")
+
+                passages = [
+                    {
+                        "id": str(i),
+                        "text": doc.page_content
+                    }
+                    for i, doc in enumerate(results)
+                ]
+
+                rerank_request = RerankRequest(
+                    query=query,
+                    passages=passages
+                )
+
+                reranked = reranker.rerank(rerank_request)
+
+                # Reorder Chroma docs according to FlashRank scores
+                reranked_docs = []
+                for item in reranked[:5]:  # Top-5 after reranking
+                    reranked_docs.append(results[int(item["id"])])
+
+                results = reranked_docs
+
+        # 3. Process & Deduplicate Results
+        seen_sections = set()
+        output = []
 
         for doc in results:
             sec_id = doc.metadata.get("section")
             full_text = doc.metadata.get("parent_content")
+            title = doc.metadata.get("title")
 
-            if sec_id and sec_id not in unique_parents:
-                unique_parents[sec_id] = {
-                    "text": full_text,
-                    "title": doc.metadata.get("title"),
-                    "meta": doc.metadata
-                }
-
-        # 3. Re-rank
-        passages = [
-            {"id": k, "text": v["text"], "meta": v["meta"]}
-            for k, v in unique_parents.items()
-        ]
-
-        rerank_request = RerankRequest(
-            query=query,
-            passages=passages
-        )
-
-        ranked_results = ranker.rerank(rerank_request)
-
-        # 4. Return Top 3
-        output = []
-
-        print("\n===== DEBUG RETRIEVAL =====")
-        for i, hit in enumerate(ranked_results[:3]):
-            sec_id = hit["id"]
-            full_text = unique_parents[sec_id]["text"]
-            title = unique_parents[sec_id]["title"]
-            score = hit["score"]
-
-            print(
-                f"Rank {i + 1}: Section {sec_id} "
-                f"(Score: {score:.4f})"
-            )
+            # Deduplicate by section ID
+            if sec_id in seen_sections:
+                continue
+            
+            seen_sections.add(sec_id)
 
             output.append(
                 f"SECTION: {sec_id}\n"
                 f"TITLE: {title}\n"
                 f"FULL CONTENT:\n{full_text}\n---"
             )
+            
+            # Stop after 3 unique sections to keep context window clean
+            if len(output) >= 3:
+                break
 
-        print("==========================\n")
-
-        return "\n".join(output) if output else "No relevant sections found."
+        final_response = "\n".join(output) if output else "No relevant sections found."
+        return final_response
 
     except Exception as e:
         return f"Error in search: {e}"
