@@ -1,196 +1,244 @@
-# backend/benchmark.py
 import sys
+import time
 import numpy as np
+import pymongo
+import certifi
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
 from flashrank import Ranker, RerankRequest
+from tabulate import tabulate
 
-
-# --- CONFIG ---
+# --- CONFIGURATION ---
+MONGO_URI = "mongodb+srv://venky27274_db_user:eaOlsGwJxuygDSOw@cluster0.3ue3woh.mongodb.net/"
+DB_NAME = "LegalLens"
+COLLECTION_NAME = "acts"
 CHROMA_PATH_SMART = "./chroma_db_smart"
 
-print("--- [BENCHMARK] Initializing LegalLens Evaluation ---")
+print("--- [BENCHMARK] Initializing Ultimate Comparison Suite ---")
+
+# 1. SETUP MONGODB (KEYWORD SEARCH)
+print("🔌 Connecting to MongoDB (Keyword Engine)...")
+try:
+    client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+    mongo_col = client[DB_NAME][COLLECTION_NAME]
+    # Create Text Index if it doesn't exist
+    mongo_col.create_index([
+        ("full_content", "text"), 
+        ("title", "text"), 
+        ("section", "text")
+    ], name="legal_text_search")
+    print("✅ MongoDB Text Index Ready.")
+except Exception as e:
+    print(f"⚠️ MongoDB Connection Failed: {e}")
+    mongo_col = None
+
+# 2. SETUP VECTOR STORE
+print("🔌 Loading ChromaDB (Vector Engine)...")
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 vectorstore = Chroma(persist_directory=CHROMA_PATH_SMART, embedding_function=embeddings)
-print("🔁 Initializing FlashRank...")
 
+# 3. SETUP RERANKER
+print("🔁 Loading FlashRank (Reranker)...")
 try:
-    reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
+    reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./opt")
     print("✅ FlashRank Ready.")
 except Exception as e:
-    print(f"❌ FlashRank failed to load: {e}")
+    print(f"❌ FlashRank failed: {e}")
     reranker = None
 
-# --- THE GOLDEN DATASET (20 Complex Queries) ---
-# --- THE GOLDEN DATASET (50 Complex Queries) ---
+# --- EXPANDED DATASET (60 Queries) ---
 test_set = [
 
-    # ======================================================
-    # CLUSTER 1: EXPORT & SEZ INCENTIVES (Section 10)
-    # ======================================================
-    {"query": "What deductions are available for 100% export-oriented undertakings?", "expected_section": "10B"},
-    {"query": "tax holiday for special economic zones (SEZ)", "expected_section": "10A"},
-    {"query": "conditions for newly established undertakings in free trade zones", "expected_section": "10A"},
-    {"query": "deduction for export of wood based handmade articles", "expected_section": "10BA"},
-    {"query": "consequences of amalgamation or demerger for export undertakings", "expected_section": "10B"},
-    {"query": "profit deduction for software technology park units", "expected_section": "10A"},
-    {"query": "tax exemption for export profits of EOUs", "expected_section": "10B"},
-    {"query": "eligibility conditions for SEZ unit tax exemption", "expected_section": "10AA"},
+# =====================================================
+# CLUSTER 1: EXPORT & SEZ (Section 10A / 10AA / 10B / 10BA)
+# =====================================================
+{"query": "deductions for 100% export-oriented undertakings", "expected": "10B"},
+{"query": "tax holiday available for SEZ units", "expected": "10AA"},
+{"query": "conditions for software technology park units", "expected": "10A"},
+{"query": "export of handmade wooden articles deduction", "expected": "10BA"},
+{"query": "audit requirements for claiming export deduction", "expected": "10B"},
+{"query": "deduction for online export of computer software", "expected": "10B"},
+{"query": "definition of computer programme for export benefits", "expected": "10BB"},
+{"query": "tax benefits for SEZ developers", "expected": "10AA"},
 
-    # ======================================================
-    # CLUSTER 3: STARTUPS & BUSINESS DEDUCTIONS (Chapter VI-A)
-    # ======================================================
-    {"query": "tax deduction for eligible startups incorporated after 2016", "expected_section": "80-IAC"},
-    {"query": "deduction in respect of employment of new employees", "expected_section": "80JJAA"},
-    {"query": "royalty income deduction for authors of books", "expected_section": "80QQB"},
-    {"query": "deduction for royalty on patents", "expected_section": "80RRB"},
-    {"query": "profits deduction for infrastructure development undertakings", "expected_section": "80-IA"},
-    {"query": "deduction for power generation companies", "expected_section": "80-IA"},
-    {"query": "tax benefits for cooperative societies", "expected_section": "80P"},
-    {"query": "deduction for export profits of certain undertakings", "expected_section": "80HHC"},
+# =====================================================
+# CLUSTER 2: STARTUPS & BUSINESS INCENTIVES (80 SERIES)
+# =====================================================
+{"query": "tax deduction for eligible startups incorporated after 2016", "expected": "80-IAC"},
+{"query": "profit linked deduction for infrastructure development undertakings", "expected": "80-IA"},
+{"query": "deduction for employment of new employees", "expected": "80JJAA"},
+{"query": "tax benefits for cooperative societies", "expected": "80P"},
+{"query": "deduction for profits from export business", "expected": "80HHC"},
+{"query": "deduction for power generation companies", "expected": "80-IA"},
+{"query": "tax benefits for housing projects", "expected": "80-IBA"},
+{"query": "deduction for research and development expenditure", "expected": "80-IB"},
 
-    # ======================================================
-    # CLUSTER 4: CAPITAL GAINS EXEMPTIONS (Section 54 Series)
-    # ======================================================
-    {"query": "capital gains exemption on sale of residential house property", "expected_section": "54"},
-    {"query": "exemption for transfer of agricultural land", "expected_section": "54B"},
-    {"query": "capital gain exemption for investment in NHAI or REC bonds", "expected_section": "54EC"},
-    {"query": "capital gains exemption on sale of multiple residential houses", "expected_section": "54F"},
-    {"query": "exemption on compulsory acquisition of land", "expected_section": "54B"},
-    {"query": "time limit for reinvestment to claim capital gain exemption", "expected_section": "54"},
+# =====================================================
+# CLUSTER 3: CAPITAL GAINS (SECTION 54 FAMILY)
+# =====================================================
+{"query": "capital gains exemption on sale of residential house", "expected": "54"},
+{"query": "exemption for transfer of agricultural land", "expected": "54B"},
+{"query": "capital gains exemption for investment in NHAI bonds", "expected": "54EC"},
+{"query": "capital gains exemption when only one residential house is owned", "expected": "54F"},
+{"query": "time limit for reinvestment to claim capital gains exemption", "expected": "54"},
+{"query": "capital gains relief on compulsory acquisition of land", "expected": "54B"},
 
-    # ======================================================
-    # CLUSTER 5: PERSONAL DEDUCTIONS (Individual Taxpayers)
-    # ======================================================
-    {"query": "deduction for interest paid on loan for higher education", "expected_section": "80E"},
-    {"query": "deduction for interest on loan taken for residential house property", "expected_section": "80EE"},
-    {"query": "medical insurance premium deduction limits", "expected_section": "80D"},
-    {"query": "deduction for rent paid if HRA is not received", "expected_section": "80GG"},
-    {"query": "tax deduction for donations to charitable institutions", "expected_section": "80G"},
-    {"query": "deduction for maintenance of disabled dependent", "expected_section": "80DD"},
-    {"query": "deduction for medical treatment of specified diseases", "expected_section": "80DDB"},
-    {"query": "interest income deduction for senior citizens", "expected_section": "80TTB"},
-    {"query": "savings account interest deduction", "expected_section": "80TTA"},
+# =====================================================
+# CLUSTER 4: PERSONAL DEDUCTIONS (INDIVIDUAL TAXPAYERS)
+# =====================================================
+{"query": "deduction for interest paid on education loan", "expected": "80E"},
+{"query": "medical insurance premium deduction limits", "expected": "80D"},
+{"query": "deduction for maintenance of disabled dependent", "expected": "80DD"},
+{"query": "deduction for treatment of specified diseases", "expected": "80DDB"},
+{"query": "interest income deduction for senior citizens", "expected": "80TTB"},
+{"query": "savings account interest deduction", "expected": "80TTA"},
+{"query": "deduction for rent paid if HRA not received", "expected": "80GG"},
+{"query": "donation deduction for PM relief fund", "expected": "80G"},
 
-        # ======================================================
-    # CLUSTER 6: EDGE CASES & HIGH-CONFUSION QUERIES
-    # ======================================================
+# =====================================================
+# CLUSTER 5: SALARY & RETIREMENT (LIMITED SECTION 10)
+# =====================================================
+{"query": "house rent allowance exemption rules", "expected": "10(13A)"},
+{"query": "gratuity exemption limit on retirement", "expected": "10(10)"},
+{"query": "voluntary retirement compensation tax exemption", "expected": "10(10C)"},
+{"query": "leave encashment exemption at retirement", "expected": "10(10AA)"},
+{"query": "commuted pension exemption rules", "expected": "10(10A)"},
+{"query": "agricultural income tax exemption", "expected": "10(1)"},
 
-    # --- Similar wording, different sections (ranking stress) ---
-    {"query": "tax exemption on profits of newly established industrial undertaking", "expected_section": "10A"},
-    {"query": "profit linked deduction for infrastructure facilities", "expected_section": "80-IA"},
-    {"query": "income tax benefit for SEZ developers", "expected_section": "10AA"},
-    {"query": "tax exemption for export of computer software", "expected_section": "10A"},
-
-    # --- Capital gains corner cases ---
-    {"query": "capital gains exemption when land is compulsorily acquired by government", "expected_section": "54B"},
-    {"query": "investment in bonds to save long term capital gains tax", "expected_section": "54EC"},
-    {"query": "capital gains exemption if only one residential house is owned", "expected_section": "54F"},
-    {"query": "capital gains tax relief for farmers selling agricultural land", "expected_section": "54B"},
-
-    # --- Senior citizen & individual relief ---
-    {"query": "tax deduction for interest income of senior citizens", "expected_section": "80TTB"},
-    {"query": "medical expense deduction for dependent with disability", "expected_section": "80DD"},
-    {"query": "tax deduction for treatment of cancer or chronic diseases", "expected_section": "80DDB"},
-    {"query": "deduction for donations made to PM relief fund", "expected_section": "80G"}
-
+# =====================================================
+# CLUSTER 6: SEMANTIC / NATURAL LANGUAGE (REAL USER QUERIES)
+# =====================================================
+{"query": "how can a startup save tax legally in india", "expected": "80-IAC"},
+{"query": "how to reduce capital gains tax after selling land", "expected": "54"},
+{"query": "tax benefits for senior citizens earning interest income", "expected": "80TTB"},
+{"query": "tax saving options for salaried employees without hra", "expected": "80GG"},
+{"query": "how to save tax on profits from exports", "expected": "10B"},
+{"query": "is income from farming taxable in india", "expected": "10(1)"},
+{"query": "tax benefit for parents paying insurance for children", "expected": "80D"},
+{"query": "tax deduction available for donations to charity", "expected": "80G"},
+{"query": "tax benefit for investment in infrastructure bonds", "expected": "54EC"},
+{"query": "deduction for interest on education loan taken abroad", "expected": "80E"}
 ]
 
-def calculate_metrics(k=15):
-    print(f"\n🚀 Starting Stress Test (Top-k={k})...")
-    print(f"{'QUERY':<60} | {'EXPECTED':<10} | {'STATUS':<10} | {'RANK':<5}")
-    print("-" * 100)
+def check_match(doc_content, doc_meta, expected_id):
+    """Universal matcher for Mongo and Chroma docs"""
+    # 1. Metadata Check
+    if isinstance(doc_meta, dict):
+        section_val = str(doc_meta.get("section", ""))
+        if expected_id == section_val: return True
     
-    hits = 0
-    reciprocal_ranks = []
+    # 2. Content Check (Smart Stamp)
+    # Checks if "Section 10B" appears in the first 200 chars
+    if f"Section {expected_id}" in str(doc_content)[:200]:
+        return True
     
+    return False
+
+def run_benchmark():
+    print(f"\n🚀 Running Tri-Fold Benchmark on {len(test_set)} Queries...")
+    
+    table_data = []
+    stats = {
+        "mongo": {"hits": 0, "mrr": 0},
+        "vector": {"hits": 0, "mrr": 0},
+        "rerank": {"hits": 0, "mrr": 0}
+    }
+
     for case in test_set:
         query = case["query"]
-        expected = case["expected_section"]
+        expected = case["expected"]
         
-        # 1. Run Retrieval
+        # --- 1. MONGO SEARCH (Keyword) ---
+        m_rank = "-"
+        if mongo_col is not None: # <--- FIXED CRASH HERE
+            try:
+                # Text search sorted by relevance score
+                cursor = mongo_col.find(
+                    {"$text": {"$search": query}},
+                    {"score": {"$meta": "textScore"}, "section": 1, "full_content": 1}
+                ).sort([("score", {"$meta": "textScore"})]).limit(15)
+                
+                for i, doc in enumerate(cursor):
+                    if check_match(doc.get("full_content"), doc, expected):
+                        m_rank = i + 1
+                        stats["mongo"]["hits"] += 1
+                        stats["mongo"]["mrr"] += 1/m_rank
+                        break
+            except Exception: pass
+
+        # --- 2. VECTOR SEARCH (Standard RAG) ---
+        v_rank = "-"
+        v_results = []
         try:
-            # 1. Recall Stage (Vector Search)
-            results = vectorstore.similarity_search(query, k=k)
+            # Fetch top 15 directly
+            v_results = vectorstore.similarity_search(query, k=15)
+            for i, doc in enumerate(v_results):
+                if check_match(doc.page_content, doc.metadata, expected):
+                    v_rank = i + 1
+                    stats["vector"]["hits"] += 1
+                    stats["vector"]["mrr"] += 1/v_rank
+                    break
+        except Exception: pass
 
-            # 2. Precision Stage (FlashRank)
-            if reranker and results:
-                passages = [
-                    {
-                        "id": str(i),
-                        "text": doc.page_content
-                    }
-                    for i, doc in enumerate(results)
-                ]
-
-                rerank_request = RerankRequest(
-                    query=query,
-                    passages=passages
-                )
-
-                reranked = reranker.rerank(rerank_request)
-
-                # Reorder docs based on reranker score
-                reranked_docs = []
-                for item in reranked:
-                    reranked_docs.append(results[int(item["id"])])
-
-                results = reranked_docs
-
-        except Exception as e:
-            print(f"Error searching '{query}': {e}")
-            continue
-        
-        found = False
-        rank = 0
-        
-        # 2. Check Results
-        for i, doc in enumerate(results):
-            # We check both the metadata field and the stamped content
-            # This handles cases where metadata might be formatted differently
-            meta_id = str(doc.metadata.get("section", ""))
-            content_preview = doc.page_content[:100] # Peek at the "Smart Stamp"
+        # --- 3. RERANK SEARCH (LegalLens) ---
+        r_rank = "-"
+        try:
+            # Step A: Fetch Deep (Recall) - Increased to 60
+            deep_results = vectorstore.similarity_search(query, k=60)
             
-            # Match Logic: Does the ID appear in the metadata OR the stamped text?
-            if (expected in meta_id) or (f"Section {expected}" in content_preview):
-                found = True
-                rank = i + 1
-                break
-        
-        # 3. Log Output
-        if found:
-            hits += 1
-            reciprocal_ranks.append(1 / rank)
-            print(f"{query[:58]:<60} | {expected:<10} | {'✅ PASS':<10} | {rank:<5}")
-        else:
-            reciprocal_ranks.append(0)
-            print(f"{query[:58]:<60} | {expected:<10} | {'❌ FAIL':<10} | {'-':<5}")
+            # Step B: Rerank (Precision)
+            if reranker is not None:
+                passages = [{"id": str(i), "text": d.page_content} for i, d in enumerate(deep_results)]
+                rerank_req = RerankRequest(query=query, passages=passages)
+                ranked = reranker.rerank(rerank_req)
+                
+                # Step C: Top 15
+                final_docs = [deep_results[int(r['id'])] for r in ranked[:15]]
+                
+                for i, doc in enumerate(final_docs):
+                    if check_match(doc.page_content, doc.metadata, expected):
+                        r_rank = i + 1
+                        stats["rerank"]["hits"] += 1
+                        stats["rerank"]["mrr"] += 1/r_rank
+                        break
+        except Exception: pass
 
-    # --- STATISTICS ---
-    recall = hits / len(test_set)
-    mrr = np.mean(reciprocal_ranks) if reciprocal_ranks else 0
+        # Log Row
+        # Format: Query | Exp | Mongo | Vector | Rerank
+        row = [
+            query[:30] + "...",
+            expected,
+            f"✅ {m_rank}" if m_rank != "-" else "❌",
+            f"✅ {v_rank}" if v_rank != "-" else "❌",
+            f"✅ {r_rank}" if r_rank != "-" else "❌"
+        ]
+        table_data.append(row)
+        sys.stdout.write(".")
+        sys.stdout.flush()
+
+    print("\n\n")
+    headers = ["Query", "Exp", "Mongo (Key)", "Vector (Std)", "Rerank (Adv)"]
+    print(tabulate(table_data, headers=headers, tablefmt="github"))
+
+    # --- FINAL SCORES ---
+    total = len(test_set)
+    print("\n" + "="*60)
+    print("📊 FINAL SCIENTIFIC COMPARISON")
+    print("="*60)
+    print(f"{'METRIC':<15} | {'MONGO (Baseline)':<18} | {'VECTOR (RAG)':<18} | {'LEGALLENS (Ours)':<18}")
+    print("-" * 80)
     
-    return recall, mrr
+    m_rec = stats['mongo']['hits']/total
+    v_rec = stats['vector']['hits']/total
+    r_rec = stats['rerank']['hits']/total
+    
+    m_mrr = stats['mongo']['mrr']/total
+    v_mrr = stats['vector']['mrr']/total
+    r_mrr = stats['rerank']['mrr']/total
 
-# --- MAIN EXECUTION ---
+    print(f"{'Recall@15':<15} | {m_rec:.2%}             | {v_rec:.2%}             | {r_rec:.2%}")
+    print(f"{'MRR Score':<15} | {m_mrr:.4f}             | {v_mrr:.4f}             | {r_mrr:.4f}")
+    print("="*60)
+
 if __name__ == "__main__":
-    # IMPORTANT: We use k=15 to solve the "Crowding" problem
-    recall_score, mrr_score = calculate_metrics(k=15)
-
-    print("\n" + "="*40)
-    print("📊 LEGAL LENS BENCHMARK REPORT")
-    print("="*40)
-    print(f"Total Queries: {len(test_set)}")
-    print(f"Recall@15:     {recall_score:.2f} ({recall_score*100}%)")
-    print(f"MRR Score:     {mrr_score:.2f}")
-    print("-" * 40)
-    
-    if recall_score > 0.85:
-        print("🏆 STATUS: PUBLICATION READY")
-        print("Great job! Your system is robust enough for a Scopus paper.")
-    elif recall_score > 0.6:
-        print("⚠️ STATUS: GOOD BUT NEEDS TUNING")
-        print("Check if your MongoDB is missing chapters (e.g., Section 80 or 54).")
-    else:
-        print("❌ STATUS: CRITICAL FAILURE")
-        print("Did you re-run 'ingest_smart.py'? Your DB might be empty or old.")
+    run_benchmark()
