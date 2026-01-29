@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react'
+import { useNavigate } from "react-router-dom";
 import axios from 'axios'
 import { Sparkles, Send, Paperclip, Image, File, PiggyBank, Calculator, TrendingUp, Settings, HelpCircle, LogOut, ChevronDown, Bell, Grid3x3, MoreVertical, MessageSquare, Plus, Trash2 } from 'lucide-react'
 import '../App.css'
@@ -13,6 +14,7 @@ function ChatPage() {
     const [chatHistory, setChatHistory] = useState([])
     const [currentChatId, setCurrentChatId] = useState(null)
     const messagesEndRef = useRef(null)
+    const navigate = useNavigate();
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -203,6 +205,13 @@ function ChatPage() {
 
                 <div className="sidebar-content">
                     {/* New Chat Button */}
+                    <button
+                    onClick={() => navigate("/ocr")}
+                    className="new-chat-button"
+                    >
+                    📄 Manage Bills
+                    </button>
+
                     <button onClick={startNewChat} className="new-chat-button">
                         <Plus className="h-4 w-4" />
                         <span>New Chat</span>

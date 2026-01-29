@@ -1,10 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from ocr.router import router as ocr_router
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import os
 import uvicorn
 import traceback
+from db.mongo import connect_to_mongo, close_mongo_connection
+from db.indexes import create_indexes
+
 
 # Import the new Orchestrator
 try:
@@ -23,7 +27,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+
 )
+app.include_router(ocr_router)
+
 
 class ChatMessage(BaseModel):
     message: str
@@ -40,11 +47,20 @@ class ChatResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
+    await connect_to_mongo()
+    await create_indexes()
     """Check connections on startup"""
     if not AGENT_AVAILABLE:
         print("CRITICAL: Agent Core not loaded.")
     else:
         print("Backend ready with Agentic RAG Orchestrator!")
+    print("MongoDB connected")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_mongo_connection()
+    print("MongoDB connection closed")
 
 @app.get("/")
 async def root():
