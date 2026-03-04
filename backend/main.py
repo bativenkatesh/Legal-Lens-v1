@@ -8,6 +8,7 @@ import uvicorn
 import traceback
 from db.mongo import connect_to_mongo, close_mongo_connection
 from db.indexes import create_indexes
+from utils.financial_context import get_user_financial_context
 
 
 # Import the new Orchestrator
@@ -88,7 +89,44 @@ async def chat(message: ChatMessage):
 
         # 1. CRITICAL FIX: Use .invoke({"input": ...})
         # The orchestrator is a LangChain AgentExecutor
-        result = orchestrator.invoke({"input": message.message})
+        query = message.message.lower()
+
+        FINANCIAL_KEYWORDS = [
+            "my deduction",
+            "my tax",
+            "how much tax",
+            "my savings",
+            "my bills",
+            "this year",
+            "total deduction",
+        ]
+
+        is_financial_query = any(keyword in query for keyword in FINANCIAL_KEYWORDS)
+
+        if is_financial_query:
+            user_id = "user_123"
+            financial_context = await get_user_financial_context(user_id)
+
+            augmented_prompt = f"""
+            You are an AI tax assistant.
+
+            Below is the user's financial summary:
+
+            {financial_context}
+
+            If calculating tax savings:
+            - Assume 20% tax slab unless specified.
+            - Tax savings = deduction × slab.
+
+            User Question:
+            {message.message}
+            """
+
+            result = orchestrator.invoke({"input": augmented_prompt})
+
+        else:
+            # Normal RAG without personal financial data
+            result = orchestrator.invoke({"input": message.message})
         
         # 2. Extract the final text response
         # AgentExecutor returns a dict with 'input', 'output', and optionally 'intermediate_steps'
