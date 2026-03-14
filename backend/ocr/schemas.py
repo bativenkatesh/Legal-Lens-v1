@@ -13,6 +13,16 @@ class ParsedBill(BaseModel):
 
     confidence: Optional[float]
 
+class ParsedGSTInvoice(BaseModel):
+    type: Optional[str]               # E or OE
+    place_of_supply: Optional[str]    # State Code
+    applicable_tax_rate_percent: Optional[str] # 65% or blank
+    rate: Optional[str]               # Combined or Integrated tax rate
+    taxable_value: Optional[float]    # Up to 2 decimal digits
+    cess_amount: Optional[float]
+    total_amount: Optional[float]
+    gstin: Optional[str]
+
 from typing import Optional
 from datetime import datetime
 

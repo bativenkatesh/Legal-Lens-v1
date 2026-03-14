@@ -1,7 +1,9 @@
 from fastapi import APIRouter
 from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
 from ocr.ocr_engine import extract_text_from_file
-from ocr.parser import parse_bill_text
+from ocr.parser import parse_bill_text, parse_gst_invoice_text
+from ocr.excel_exporter import append_to_excel, EXCEL_FILE_PATH, reset_excel
 from uuid import uuid4
 import os
 from db.bills import get_bills_collection
@@ -15,6 +17,29 @@ router = APIRouter(
 )
 UPLOAD_DIR = "uploads/bills"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@router.get("/file/{bill_id}")
+async def get_bill_file(bill_id: str):
+    """Serve the uploaded bill file (image or PDF) for preview."""
+    matches = [
+        f for f in os.listdir(UPLOAD_DIR)
+        if f.startswith(bill_id)
+    ]
+    if not matches:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    file_path = os.path.join(UPLOAD_DIR, matches[0])
+    ext = os.path.splitext(matches[0])[1].lower()
+
+    media_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".pdf": "application/pdf",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+    return FileResponse(file_path, media_type=media_type)
+
 
 @router.post("/upload")
 async def upload_bill(file: UploadFile = File(...)):
@@ -181,3 +206,81 @@ async def update_bill(bill_id: str, payload: dict):
         raise HTTPException(status_code=404, detail="Bill not found")
 
     return {"status": "updated"}
+
+@router.delete("/bill/{bill_id}")
+async def delete_bill(bill_id: str):
+    bills = get_bills_collection()
+
+    result = await bills.delete_one({"bill_id": bill_id})
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Bill not found")
+
+    # Also remove the uploaded file from disk
+    for f in os.listdir(UPLOAD_DIR):
+        if f.startswith(bill_id):
+            os.remove(os.path.join(UPLOAD_DIR, f))
+            break
+
+    return {"status": "deleted"}
+
+@router.post("/gst/upload")
+async def upload_gst_invoice(file: UploadFile = File(...)):
+    if file.content_type not in ["image/png", "image/jpeg", "image/jpg", "application/pdf"]:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    bill_id = str(uuid4())
+    extension = os.path.splitext(file.filename)[1]
+    filename = f"gst_{bill_id}{extension}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+
+    try:
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to save file")
+
+    # 1. Extract text
+    try:
+        raw_text = extract_text_from_file(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="OCR failed")
+
+    # 2. Parse GST fields using LLM
+    try:
+        parsed_gst = parse_gst_invoice_text(raw_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to parse GST fields")
+
+    # 3. Append to Excel
+    try:
+        append_to_excel(parsed_gst.model_dump())
+    except Exception as e:
+        print("Excel error:", e)
+        raise HTTPException(status_code=500, detail="Failed to append to Excel")
+
+    return {
+        "status": "success",
+        "bill_id": bill_id,
+        "parsed_data": parsed_gst.model_dump()
+    }
+
+@router.get("/gst/excel")
+async def download_gst_excel():
+    """Serves the master GST Excel file for download."""
+    if not os.path.exists(EXCEL_FILE_PATH):
+        raise HTTPException(status_code=404, detail="No invoices have been uploaded yet.")
+    
+    return FileResponse(
+        EXCEL_FILE_PATH,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="gst_invoices.xlsx"
+    )
+
+@router.delete("/gst/excel")
+async def reset_gst_excel():
+    """Deletes the master GST Excel file."""
+    success = reset_excel()
+    if not success:
+        raise HTTPException(status_code=404, detail="Excel file not found.")
+    return {"status": "success", "message": "Excel file reset."}

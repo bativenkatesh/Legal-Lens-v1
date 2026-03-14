@@ -4,11 +4,15 @@ from ocr.tax_rules import SECTION_LIMITS
 async def compute_yearly_summary(user_id: str, financial_year: str):
     bills = get_bills_collection()
 
-    cursor = bills.find({
+    query = {
         "user_id": user_id,
-        "financial_year": financial_year,
         "tax_eligible": True
-    })
+    }
+    # If a specific FY is selected (not "all"), filter by it
+    if financial_year != "all":
+        query["financial_year"] = financial_year
+
+    cursor = bills.find(query)
 
     section_totals = {}
     total_allowed = 0
