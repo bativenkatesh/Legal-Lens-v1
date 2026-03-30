@@ -8,9 +8,10 @@ import uvicorn
 import traceback
 from db.mongo import connect_to_mongo, close_mongo_connection
 from db.indexes import create_indexes
+from db.conversation import get_messages, save_message
 from utils.financial_context import get_user_financial_context
 from utils.query_router import route_query
-
+import uuid
 # Import the new Orchestrator
 try:
     from agent_core import orchestrator
@@ -35,7 +36,7 @@ app.include_router(ocr_router)
 
 class ChatMessage(BaseModel):
     message: str
-    conversation_history: Optional[List[dict]] = []
+    conversation_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -43,6 +44,7 @@ class ChatResponse(BaseModel):
     # return a single string output by default.
     relevant_sections: Optional[List[dict]] = []
     relevant_articles: Optional[List[dict]] = []
+    chat_history: Optional[List[dict]] = []
     debug_info: Optional[dict] = None
     status: str
 
@@ -86,51 +88,55 @@ async def chat(message: ChatMessage):
 
     try:
         print(f"Received Query: {message.message}")
+        user_id = "user_123" # Mock user_id
+        conversation_id = message.conversation_id or "default_session"
+        
+        # 1. Retrieve existing chat history (per-message docs)
+        history_docs = get_messages(user_id, conversation_id, limit=10)
+        history_msgs = []
+        raw_history = []
+        
+        from langchain_core.messages import HumanMessage, AIMessage
+        for m in history_docs:
+            # For the agent's internal list
+            if m["role"] == "user":
+                history_msgs.append(HumanMessage(content=m["content"]))
+            else:
+                history_msgs.append(AIMessage(content=m["content"]))
+            # For the response back to frontend
+            raw_history.append({"role": m["role"], "content": m["content"]})
 
-        # 1. CRITICAL FIX: Use .invoke({"input": ...})
-        # The orchestrator is a LangChain AgentExecutor
+        # 2. Save current user message to DB immediately
+        save_message(user_id, conversation_id, "user", message.message)
+        raw_history.append({"role": "user", "content": message.message})
+
+        # 3. Detect Intent
         intent = await route_query(message.message)
-
         print("Detected Intent:", intent)
 
         if intent == "FINANCIAL":
-
-            user_id = "user_123"
             financial_context = await get_user_financial_context(user_id)
-
-            augmented_prompt = f"""
-        You are an AI tax assistant.
-
-        Below is the user's financial summary from uploaded bills:
-
-        {financial_context}
-
-        If calculating tax savings:
-        - Assume the user is in the 20% tax slab unless specified.
-        - Tax savings = deduction × slab percentage.
-
-        User Question:
-        {message.message}
-        """
-
-            result = orchestrator.invoke({"input": augmented_prompt})
-
+            input_text = f"User's financial summary: {financial_context}\n\nQuestion: {message.message}"
         else:
-            # LEGAL or GENERAL → normal RAG
-            result = orchestrator.invoke({"input": message.message})
+            input_text = message.message
+
+        # 4. Invoke Orchestrator with chat_history
+        result = orchestrator.invoke({
+            "input": input_text,
+            "chat_history": history_msgs
+        })
         
-        # 2. Extract the final text response
-        # AgentExecutor returns a dict with 'input', 'output', and optionally 'intermediate_steps'
         final_answer = result.get("output", "No response generated.")
         
-        # 3. Optional: Parse intermediate steps for debug info (advanced)
-        # For now, we will return empty lists to avoid 500 errors
-        # if the agent doesn't return structured data.
+        # 5. Save Assistant Response to DB
+        save_message(user_id, conversation_id, "assistant", final_answer)
+        raw_history.append({"role": "assistant", "content": final_answer})
         
         return ChatResponse(
             response=final_answer,
-            relevant_sections=[], # Placeholder: Standard agents don't return these cleanly split
-            relevant_articles=[], # Placeholder
+            relevant_sections=[], 
+            relevant_articles=[], 
+            chat_history=raw_history,
             debug_info={"full_result_keys": list(result.keys())},
             status="success"
         )

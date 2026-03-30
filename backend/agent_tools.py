@@ -22,8 +22,9 @@ from flashrank import Ranker, RerankRequest
 # --- CONFIG ---
 CHROMA_PATH = "./chroma_db_smart"
 LOCAL_MONGO_URI = "mongodb://localhost:27017/"
-LOCAL_DB_NAME = "DB1"
+LOCAL_DB_NAME = "Dataset1"
 ARTICLES_COLLECTION = "articles"
+NEWS_COLLECTION = "articles" # Using articles collection as news for now, or change if a specific news collection exists
 
 print("--- [INIT] Loading Search Engines... ---")
 
@@ -44,10 +45,14 @@ except Exception as e:
 print(" Loading FlashRank Reranker...")
 
 try:
-    reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
-    print("✅ FlashRank Ready.")
+    # Try with a persistent cache directory to avoid /tmp issues
+    import os
+    cache_dir = os.path.expanduser("~/.cache/flashrank")
+    os.makedirs(cache_dir, exist_ok=True)
+    reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir=cache_dir)
+    print(f"✅ FlashRank Ready (Cache: {cache_dir}).")
 except Exception as e:
-    print(f"❌ FlashRank failed to load: {e}")
+    print(f"⚠️ FlashRank failed to load, falling back to standard search: {e}")
     reranker = None
 
 # --- ENGINE 2: PRACTICAL ARTICLES ---
@@ -213,3 +218,46 @@ def search_practical_articles(query: str) -> str:
 
     except Exception as e:
         return f"Error: {e}"
+@tool
+def search_news_articles(query: str) -> str:
+    """
+    Search for real-world news articles and practical examples related to tax rules.
+    Use this tool to provide 'Real World Examples' after finding a legal rule.
+    """
+    if coll_articles is None:
+        return "Error: News/Article DB not loaded"
+
+    try:
+        # Standardize query
+        query_vec = model_articles.encode(query)
+
+        # Basic vector search in the articles collection
+        candidates = list(
+            coll_articles.find(
+                {},
+                {"embedding": 1, "title": 1, "full_text": 1}
+            ).limit(100)
+        )
+
+        if not candidates:
+            return "No relevant news examples found."
+
+        cand_vecs = np.array([c["embedding"] for c in candidates])
+        sims = cosine_similarity([query_vec], cand_vecs)[0]
+
+        output = []
+        # Get top 2 results for examples
+        for idx in sims.argsort()[-2:][::-1]:
+            if sims[idx] < 0.3: 
+                continue
+
+            doc = candidates[idx]
+            output.append(
+                f"EXAMPLE FROM NEWS/ARTICLE: {doc.get('title')}\n"
+                f"SUMMARY: {doc.get('full_text', '')[:500]}..."
+            )
+
+        return "\n\n".join(output) if output else "No specific real-world examples found."
+
+    except Exception as e:
+        return f"Error searching news: {e}"
