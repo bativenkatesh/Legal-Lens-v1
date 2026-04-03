@@ -7,6 +7,21 @@ ocr_llm = ChatOllama(
     model="llama3.1:8b",
     temperature=0
 )
+def fix_magnitude(value):
+    if value >= 1e7:  # suspicious (like 1 crore instead of 10 lakh)
+        return value / 10
+    return value
+def parse_indian_number(num_str):
+    if not num_str:
+        return 0.0
+    
+    # Remove commas
+    num_str = num_str.replace(",", "").strip()
+
+    try:
+        return float(num_str)
+    except:
+        return 0.0
 
 def parse_bill_text(text: str) -> ParsedBill:
     prompt = f"""
@@ -103,16 +118,28 @@ OCR TEXT:
         output = output.split("```")[1].split("```")[0].strip()
 
     try:
-        return ParsedGSTInvoice.model_validate_json(output)
+        parsed = ParsedGSTInvoice.model_validate_json(output)
+
+        # 🔥 FIX: Correct Indian number parsing
+        parsed.taxable_value = parse_indian_number(str(parsed.taxable_value))
+        parsed.total_amount = parse_indian_number(str(parsed.total_amount))
+        parsed.cess_amount = parse_indian_number(str(parsed.cess_amount))
+
+        # 🔥 OPTIONAL: Fix magnitude issues (extra zero)
+        parsed.taxable_value = fix_magnitude(parsed.taxable_value)
+        parsed.total_amount = fix_magnitude(parsed.total_amount)
+
+        return parsed
+
     except Exception:
-        # Fallback
         return ParsedGSTInvoice(
             type="OE",
             place_of_supply=None,
             applicable_tax_rate_percent="",
             rate=None,
             taxable_value=0.0,
+            total_amount=0.0,
             cess_amount=0.0,
-            ecommerce_gstin=None
+            gstin=None
         )
 
