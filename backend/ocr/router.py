@@ -110,7 +110,9 @@ async def parse_bill(bill_id: str):
     file_path = os.path.join(bills_dir, matches[0])
 
     raw_text = extract_text_from_file(file_path)
-
+    print("\n========== OCR RAW TEXT ==========\n")
+    print(raw_text)
+    print("\n=================================\n")
     from ocr.schemas import BillRecord
 
     from datetime import datetime
@@ -254,15 +256,40 @@ async def upload_gst_invoice(file: UploadFile = File(...)):
 
     # 3. Append to Excel
     try:
-        append_to_excel(parsed_gst.model_dump())
+        append_to_excel(parsed_gst)
     except Exception as e:
         print("Excel error:", e)
         raise HTTPException(status_code=500, detail="Failed to append to Excel")
 
+    # 4. Map the first B2B record to a flat structure for the frontend
+    # (Matches ParsedGSTInvoice schema in schemas.py)
+    frontend_summary = {
+        "type": "B2B",
+        "place_of_supply": None,
+        "applicable_tax_rate_percent": None,
+        "rate": None,
+        "taxable_value": 0,
+        "total_amount": 0,
+        "gstin": None,
+        "cess_amount": 0
+    }
+
+    if parsed_gst.get("b2b") and len(parsed_gst["b2b"]) > 0:
+        first = parsed_gst["b2b"][0]
+        frontend_summary["type"] = first.get("Invoice Type", "B2B")
+        frontend_summary["place_of_supply"] = first.get("Place Of Supply")
+        frontend_summary["applicable_tax_rate_percent"] = first.get("Applicable % of Tax Rate")
+        frontend_summary["rate"] = first.get("Rate")
+        frontend_summary["taxable_value"] = first.get("Taxable Value", 0)
+        frontend_summary["total_amount"] = first.get("Invoice Value", 0)
+        frontend_summary["cess_amount"] = first.get("Cess Amount", 0)
+        frontend_summary["gstin"] = first.get("E-Commerce GSTIN") # or placeholder if not found
+
     return {
         "status": "success",
         "bill_id": bill_id,
-        "parsed_data": parsed_gst.model_dump()
+        "parsed_data": frontend_summary,
+        "raw_data": parsed_gst # keep the original for debugging but hide from UI
     }
 
 @router.get("/gst/excel")
