@@ -110,3 +110,48 @@ def reset_excel() -> bool:
         os.remove(EXCEL_FILE_PATH)
         return True
     return False
+def get_excel_structured_data() -> dict:
+    """
+    Returns structured financial data instead of text.
+    """
+    if not os.path.exists(EXCEL_FILE_PATH):
+        return {"error": "No GST invoice data found"}
+
+    try:
+        xl = pd.ExcelFile(EXCEL_FILE_PATH)
+
+        data = {
+            "total_invoice_value": 0,
+            "total_taxable_value": 0,
+            "total_invoices": 0,
+            "states": [],
+            "hsn_breakdown": []
+        }
+
+        # ---- B2B ----
+        if "B2B" in xl.sheet_names:
+            df = xl.parse("B2B")
+
+            if not df.empty:
+                data["total_invoice_value"] = float(df["Invoice Value"].sum())
+                data["total_taxable_value"] = float(df["Taxable Value"].sum())
+                data["total_invoices"] = len(df)
+
+                data["states"] = list(df["Place Of Supply"].dropna().unique())
+
+        # ---- HSN ----
+        if "HSN" in xl.sheet_names:
+            df_hsn = xl.parse("HSN")
+
+            if not df_hsn.empty:
+                for _, row in df_hsn.iterrows():
+                    data["hsn_breakdown"].append({
+                        "hsn": str(row.get("HSN")),
+                        "description": str(row.get("Description")),
+                        "value": float(row.get("Taxable Value", 0))
+                    })
+
+        return data
+
+    except Exception as e:
+        return {"error": str(e)}

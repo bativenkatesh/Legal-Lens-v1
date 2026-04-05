@@ -3,7 +3,8 @@ from fastapi import UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from ocr.ocr_engine import extract_text_from_file
 from ocr.parser import parse_bill_text, parse_gst_invoice_text
-from ocr.excel_exporter import append_to_excel, EXCEL_FILE_PATH, reset_excel
+from ocr.excel_exporter import append_to_excel, EXCEL_FILE_PATH, reset_excel, get_excel_structured_data
+from ocr.tax_advisor import run_tax_saving_analysis
 from uuid import uuid4
 import os
 from db.bills import get_bills_collection
@@ -311,3 +312,31 @@ async def reset_gst_excel():
     if not success:
         raise HTTPException(status_code=404, detail="Excel file not found.")
     return {"status": "success", "message": "Excel file reset."}
+
+@router.post("/gst/tax-savings")
+async def get_gst_tax_savings():
+    """
+    Analyzes the GST Excel file and uses RAG to suggest tax savings.
+    """
+    from agent_core import orchestrator
+    
+    # 1. Get Summary from Excel
+    summary_text = get_excel_structured_data()
+    
+    if "No GST invoice data" in summary_text:
+        return {
+            "status": "info",
+            "advice": "Please upload some GST invoices first so I can analyze them for tax savings!"
+        }
+
+    # 2. Run Multi-Stage RAG Analysis
+    try:
+        final_advice = run_tax_saving_analysis(summary_text)
+        
+        return {
+            "status": "success",
+            "advice": final_advice
+        }
+    except Exception as e:
+        print("RAG Error:", e)
+        raise HTTPException(status_code=500, detail=str(e))

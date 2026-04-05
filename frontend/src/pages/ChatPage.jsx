@@ -390,6 +390,8 @@ function GSTInvoicePanel() {
     const [loading, setLoading] = useState(false);
     const [dragActive, setDragActive] = useState(false);
     const [lastExtracted, setLastExtracted] = useState(null);
+    const [taxSavingAdvice, setTaxSavingAdvice] = useState("");
+    const [adviceLoading, setAdviceLoading] = useState(false);
 
     const handleDrag = (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -431,10 +433,25 @@ function GSTInvoicePanel() {
         try {
             await axios.delete(`${API_BASE_URL}/ocr/gst/excel`);
             setLastExtracted(null);
+            setTaxSavingAdvice("");
             alert("Excel file has been reset.");
         } catch (err) {
             console.error("Reset failed", err);
             alert("Failed to reset Excel file.");
+        }
+    };
+
+    const handleGetTaxSavings = async () => {
+        setAdviceLoading(true);
+        setTaxSavingAdvice("");
+        try {
+            const res = await axios.post(`${API_BASE_URL}/ocr/gst/tax-savings`);
+            setTaxSavingAdvice(res.data.advice);
+        } catch (err) {
+            console.error("Failed to get tax savings", err);
+            alert("Failed to generate tax-saving advice. Please ensure invoices are uploaded.");
+        } finally {
+            setAdviceLoading(false);
         }
     };
 
@@ -454,6 +471,18 @@ function GSTInvoicePanel() {
                         Reset Data
                     </button>
                     <button
+                        onClick={handleGetTaxSavings}
+                        disabled={adviceLoading}
+                        className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-200 disabled:opacity-50"
+                    >
+                        {adviceLoading ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <Sparkles className="w-4 h-4" />
+                        )}
+                        Save Taxes
+                    </button>
+                    <button
                         onClick={downloadExcel}
                         className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-green-50 text-green-700 text-sm font-bold border border-green-200/60 hover:bg-green-100 transition-all"
                     >
@@ -462,6 +491,39 @@ function GSTInvoicePanel() {
                     </button>
                 </div>
             </div>
+
+            {/* AI Tax Advice Section */}
+            {taxSavingAdvice && (
+                <div className="mb-10 bg-gradient-to-br from-indigo-50 to-white rounded-2xl border border-indigo-100 p-8 shadow-sm">
+                    <div className="flex items-center gap-3 mb-6">
+                        <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-200">
+                            <Sparkles className="w-5 h-5 text-white" />
+                        </div>
+                        <div>
+                            <h3 className="text-lg font-bold text-gray-900 leading-tight">AI Tax-Saving Strategy</h3>
+                            <p className="text-xs text-indigo-600 font-bold uppercase tracking-wider">Powered by RAG & Legal Analysis</p>
+                        </div>
+                        <button 
+                            onClick={() => setTaxSavingAdvice("")}
+                            className="ml-auto text-gray-400 hover:text-gray-600 p-2"
+                        >
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+                    
+                    <div className="prose prose-indigo max-w-none">
+                        <div className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
+                            {taxSavingAdvice}
+                        </div>
+                    </div>
+
+                    <div className="mt-8 pt-6 border-t border-indigo-100/60 flex items-center gap-4">
+                        <div className="px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold">CHROMA_DB</div>
+                        <div className="px-3 py-1 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold">MONGO_EXAMPLES</div>
+                        <div className="px-3 py-1 rounded-full bg-green-100 text-green-700 text-[10px] font-bold">EXCEL_SYNCED</div>
+                    </div>
+                </div>
+            )}
 
             {/* Upload Area */}
             <div
